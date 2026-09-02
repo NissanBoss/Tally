@@ -1,0 +1,157 @@
+name: Test
+
+# All three systems for the code, and on Linux archives made by the real
+# zip and the real tar. The ones the unit tests build are laid out here by
+# hand, which is the only way to make an archive whose two listings
+# disagree, and it means they are only as right as my reading of the
+# format. What this has to work on is what Info-ZIP and GNU tar actually
+# write.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Tests
+        run: go test -v ./...
+
+      - name: The other systems still compile
+        shell: bash
+        run: |
+          for target in windows linux darwin; do
+            GOOS=$target go vet ./...
+            GOOS=$target go build -o /dev/null .
+          done
+
+  real:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Build archives with the real tools
+        run: |
+          mkdir -p made && cd made
+          mkdir -p pkg/deploy
+          echo "hello" > pkg/README.md
+          printf 'TOKEN=made-up\n' > pkg/.env
+          ln -s ../../../../../../etc/passwd pkg/deploy/config
+          printf '#!/bin/sh\necho hi\n' > pkg/helper.sh
+          chmod 4755 pkg/helper.sh
+
+          # -y keeps the symlink as a symlink rather than following it,
+          # which is the only way a zip carries one.
+          zip -qry symlink.zip pkg
+          tar czf real.tar.gz pkg
+
+          mkdir -p case
+          echo one > case/README.md
+          echo two > case/readme.md
+          zip -qr case.zip case
+
+          mkdir -p tidy/thing-1.0
+          echo a > tidy/thing-1.0/README.md
+          cd tidy && zip -qr ../tidy.zip thing-1.0 && cd ..
+
+          ls -la
+          cd ..
+
+      - name: Read them
+        run: |
+          go build -o tally-check .
+          for f in made/*.zip made/*.tar.gz; do
+            echo "════════ $f"
+            ./tally-check "$f" || true
+          done
+
+      # Every one of these is a thing the archive is known to contain, and
+      # the tag is part of the pattern because a finding in the wrong pile
+      # is the failure this program cannot afford.
+      - name: What each of them is known to hold
+        run: |
+          check() {
+            file="$1"; want="$2"; why="$3"
+            ./tally-check "made/$file" > out.txt 2>&1 || true
+            if ! grep -q "$want" out.txt; then
+              echo "MISSED in $file: $why"
+              cat out.txt
+              exit 1
+            fi
+            echo "  ok: $file $why"
+          }
+
+          check symlink.zip '\[LANDS  \].*link points outside' 'the symlink out of the folder'
+          check symlink.zip '\[LANDS  \].*run as its owner'    'the setuid bit'
+          check symlink.zip '\[CARRIES\].*should not leave'    'the .env somebody swept up'
+          check real.tar.gz '\[LANDS  \].*link points outside' 'the symlink, in a tar this time'
+          check real.tar.gz '\[CARRIES\].*where it was made'   'the owner on every entry'
+          check case.zip    '\[LANDS  \].*becomes one file'    'two names that collide on Windows'
+
+      # A tidy archive has to come back quiet, or the tool is useless on
+      # the ones that are fine, which is nearly all of them.
+      - name: A tidy archive is reported as tidy
+        run: |
+          set +e
+          ./tally-check made/tidy.zip > tidy.txt 2>&1
+          code=$?
+          set -e
+          cat tidy.txt
+          if [ "$code" -ne 0 ]; then
+            echo "An ordinary archive was reported as needing a decision."
+            exit 1
+          fi
+          tr -s '[:space:]' ' ' < tidy.txt > flat.txt
+          grep -q "Nothing here will land anywhere it should not" flat.txt || {
+            echo "it claimed more than it knows"; exit 1; }
+
+      # Its own release packages, which are made by this repository and
+      # have to come back clean.
+      - name: Its own packages come back clean
+        run: |
+          sh build.sh >/dev/null
+          set +e
+          ./tally-check dist/*.zip dist/*.tar.gz > mine.txt 2>&1
+          code=$?
+          set -e
+          cat mine.txt
+          if [ "$code" -ne 0 ]; then
+            echo "This program's own packages do not pass it."
+            exit 1
+          fi
+
+      - name: And it unpacked none of it
+        run: |
+          # Nothing in the archives above should exist outside them. If the
+          # program ever learns to extract, this is where it shows.
+          for gone in etc/passwd pkg/helper.sh README.md thing-1.0; do
+            if [ -e "$gone" ]; then
+              echo "$gone appeared in the working directory"
+              exit 1
+            fi
+          done
+          echo "read every archive and unpacked none of them"

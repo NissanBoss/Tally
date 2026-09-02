@@ -1,0 +1,8 @@
+tally
+tally.exe
+tally-check
+tally-check.exe
+dist/
+
+*.test
+*.out

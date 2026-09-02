@@ -1,0 +1,85 @@
+name: Release
+
+# Tagging a version (git tag v1) builds the five packages and puts them on
+# the Releases page.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # build.sh is the same script used to build by hand, called rather
+      # than copied. It already checks formatting, runs vet and runs the
+      # tests before compiling anything, so none of that is repeated here.
+      # GITHUB_REF_NAME is the tag, and it is what "tally --version" ends
+      # up printing.
+      - name: Build the packages
+        run: |
+          sh build.sh
+          ls -lh dist/*.zip dist/*.tar.gz
+
+      # The release text comes from CHANGELOG.md, from the section whose
+      # heading matches this tag exactly. No section, no notes: better than
+      # the same generic paragraph on every version.
+      - name: Prepare the release notes
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            awk -v wanted="## $GITHUB_REF_NAME" '
+              $0 == wanted { inside = 1; next }
+              /^## / { inside = 0 }
+              inside { print }
+            ' CHANGELOG.md > notes.md
+          fi
+          touch notes.md
+          cat >> notes.md <<'END'
+
+          ## Download
+
+          Take the package for your system, unpack it, and run the binary.
+          There is nothing to install.
+
+          | System | Package |
+          |---|---|
+          | Windows | `tally-windows.zip` |
+          | Linux | `tally-linux.tar.gz` |
+          | Linux on ARM | `tally-linux-arm.tar.gz` |
+          | Mac with Apple silicon | `tally-mac-apple.tar.gz` |
+          | Mac with Intel | `tally-mac-intel.tar.gz` |
+
+          Point it at an archive before you unpack it. It says where the
+          files will actually land, which two names become one file on
+          your machine, which link points out of the folder, and what came
+          along that nobody chose to send.
+
+          A zip lists its contents twice and nothing makes the two agree.
+          This reads both.
+
+          It never extracts anything.
+          END
+          echo "--- notes ---"
+          cat notes.md
+
+      - name: Publish
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/tally-windows.zip
+            dist/tally-linux.tar.gz
+            dist/tally-linux-arm.tar.gz
+            dist/tally-mac-apple.tar.gz
+            dist/tally-mac-intel.tar.gz
+          body_path: notes.md
