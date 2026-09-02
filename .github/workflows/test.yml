@@ -146,12 +146,20 @@ jobs:
 
       - name: And it unpacked none of it
         run: |
-          # Nothing in the archives above should exist outside them. If the
-          # program ever learns to extract, this is where it shows.
-          for gone in etc/passwd pkg/helper.sh README.md thing-1.0; do
-            if [ -e "$gone" ]; then
-              echo "$gone appeared in the working directory"
-              exit 1
-            fi
+          # From an empty directory, so that anything at all appearing is
+          # this program having written it. The first version of this check
+          # looked for a few names and one of them was README.md, which is
+          # in the repository already: a check that fails on a repository
+          # that has a readme is not checking what it says it is.
+          mkdir -p empty && cd empty
+          before=$(find . | sort)
+          for f in ../made/*.zip ../made/*.tar.gz; do
+            ../tally-check --all "$f" >/dev/null 2>&1 || true
           done
-          echo "read every archive and unpacked none of them"
+          after=$(find . | sort)
+          if [ "$before" != "$after" ]; then
+            echo "something appeared in the working directory:"
+            diff <(echo "$before") <(echo "$after") || true
+            exit 1
+          fi
+          echo "read every archive from an empty directory and nothing appeared in it"
