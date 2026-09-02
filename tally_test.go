@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -326,5 +328,95 @@ func TestListingEverything(t *testing.T) {
 func TestSomethingThatIsNotAnArchive(t *testing.T) {
 	if _, err := look("tally_test.go"); err == nil {
 		t.Error("a go file read as an archive")
+	}
+}
+
+// --- 7z ---
+
+// The check the whole LZMA decoder exists to pass. Two archives of the same
+// three files, one with its listing compressed and one without, have to
+// come out identical. A decoder that is subtly wrong does not fail here, it
+// produces a different list, and that is what this catches.
+func TestTheCompressedListingDecodesToTheSameThing(t *testing.T) {
+	packed := onDisk(t, "plain.7z", sevenPlain)
+	plain := onDisk(t, "nohdr.7z", sevenNoHeader)
+
+	if len(packed.Items) != len(plain.Items) || len(packed.Items) != 5 {
+		t.Fatalf("%d entries against %d", len(packed.Items), len(plain.Items))
+	}
+	for i := range packed.Items {
+		if packed.Items[i].Name != plain.Items[i].Name {
+			t.Errorf("entry %d is %q in one and %q in the other",
+				i, packed.Items[i].Name, plain.Items[i].Name)
+		}
+		if packed.Items[i].Size != plain.Items[i].Size {
+			t.Errorf("%s is %d bytes in one and %d in the other",
+				packed.Items[i].Name, packed.Items[i].Size, plain.Items[i].Size)
+		}
+	}
+	if !packed.Packed || plain.Packed {
+		t.Error("one of them has a compressed listing and the other does not")
+	}
+}
+
+// The sizes here are what 7z l prints for the same archive.
+func TestSevenIsReadTheWay7zReadsIt(t *testing.T) {
+	got := onDisk(t, "plain.7z", sevenPlain)
+	want := []struct {
+		name  string
+		size  uint64
+		isDir bool
+	}{
+		{"pkg", 0, true},
+		{"pkg/deploy", 0, true},
+		{"pkg/.env", 20, false},
+		{"pkg/deploy/big.txt", 5005, false},
+		{"pkg/README.md", 9, false},
+	}
+	if len(got.Items) != len(want) {
+		t.Fatalf("got %d entries, wanted %d", len(got.Items), len(want))
+	}
+	for i, w := range want {
+		item := got.Items[i]
+		if item.Name != w.name || item.Size != w.size || item.Directory() != w.isDir {
+			t.Errorf("entry %d is %q %d dir=%v, wanted %q %d dir=%v",
+				i, item.Name, item.Size, item.Directory(), w.name, w.size, w.isDir)
+		}
+	}
+	if got.Kind != "a 7z" {
+		t.Errorf("it came out as %q", got.Kind)
+	}
+}
+
+// An archive with an encrypted listing looks exactly like an empty one, and
+// saying which is which is the finding.
+func TestSevenThatWillNotSayWhatItHolds(t *testing.T) {
+	got := onDisk(t, "locked.7z", sevenLocked)
+	text := readOf(t, got, false)
+	says(t, text, "it will not say what it contains")
+	says(t, text, "is encrypted, not just the files")
+
+	if got.writeUp(false).worst() != Lies {
+		t.Error("an archive that refuses to describe itself is the loudest thing here")
+	}
+	saysNot(t, text, "Nothing here will land anywhere it should not")
+}
+
+func TestTheSevenFindsWhatCameAlong(t *testing.T) {
+	says(t, readOf(t, onDisk(t, "plain.7z", sevenPlain), false),
+		"should not leave a machine")
+}
+
+// A truncated 7z must come back rather than reading off the end of it.
+func TestABrokenSevenStops(t *testing.T) {
+	for _, cut := range []int{40, 100, 200, len(sevenPlain) - 8} {
+		body := append([]byte{}, sevenPlain[:cut]...)
+		path := filepath.Join(t.TempDir(), "cut.7z")
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := look(path); err == nil {
+			readOf(t, got, true)
+		}
 	}
 }

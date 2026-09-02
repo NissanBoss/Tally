@@ -88,6 +88,41 @@ id of whoever made it, and almost nobody knows it is in there. Point this at
 a release tarball built by GitHub Actions and it says `runner`. Point it at
 one somebody built at their desk and it says their name.
 
+## The 7z, which hides the list itself
+
+Every other format here answers "what is in this" out of plain bytes. A zip
+keeps its index in the clear at the end; a tar announces each file in a plain
+block in front of it.
+
+**A 7z compresses the list of contents.** The signature at the front points
+at a header, and that header is almost always an encoded header: a small
+description of how to decompress the real one, which is an LZMA stream. So
+there is no way to answer what is in a 7z without decoding LZMA. Not the
+files. Just the list of their names.
+
+So there is an LZMA decoder in here: the range coder, the adaptive
+probability models, the length and distance decoders. About six hundred
+lines whose only job is to find out what an archive is called inside.
+
+It is checked the only way that means anything. The same three files were
+packed twice by 7-Zip, once normally and once with `-mhc=off` so the listing
+stays in the clear, and both are in the tests. The two have to come out
+saying exactly the same thing. A decoder that is subtly wrong does not fail:
+it produces plausible bytes, and plausible bytes here is a list of files that
+reads like a list of files and is not the one in the archive.
+
+Two findings come with the format and neither exists anywhere else:
+
+**It can refuse to say.** A 7z made with `-mhe=on` encrypts the names as well
+as the contents. Opened without the password it has no list at all, which
+looks exactly like an archive with nothing in it. Nothing tells people which
+of those two they are looking at, and this does.
+
+**It can delete things.** 7z carries anti-items: entries whose job is to
+remove a file when the archive is unpacked, so that an incremental backup can
+record a deletion. An entry that takes something off your disk rather than
+putting something on it, and no listing tool shows the difference.
+
 ## What already exists
 
 `unzip -l` and `tar -t` print one listing and stop. That is what they are
@@ -116,6 +151,10 @@ The tar side uses the standard library, because a tar has one list and there
 is nothing to compare. What it adds is everything a tar can carry that a zip
 cannot: device nodes, fifos, hard links, and the owner on every entry.
 
+The 7z reader and the LZMA decoder behind it are both written here, for the
+reason in the section above: there is no other way to find out what a 7z
+contains.
+
 **It never extracts anything.** The only bytes it decompresses are the ones
 inside a symlink entry, because where a link points is the entire question
 about a link.
@@ -125,10 +164,11 @@ about a link.
 It reads the listing, not the files. What is inside each one is a different
 question, and an archive inside the archive is named rather than opened.
 
-Zip, tar, tar.gz and tar.bz2. An xz, a zstd, a 7z or a rar is recognised and
-said to be unread rather than counted as clean, because unpacking any of
-them needs code that is not in the standard library and this program has no
-dependencies.
+Zip, 7z, tar, tar.gz and tar.bz2. An xz, a zstd or a rar is recognised and
+said to be unread rather than counted as clean. A rar would be the easiest
+of those to add, because its headers are not compressed, and it is not here
+because the program that writes one is not free software: there is no honest
+way to test a reader against archives it has never been shown.
 
 It cannot tell you whether an archive is malicious. A release tarball that
 spills into the current directory is untidy, not an attack, and plenty of

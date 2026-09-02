@@ -60,8 +60,14 @@ type Tally struct {
 	Unpacked uint64
 	// Zip is kept whole when it was one, because the two listings only
 	// exist there.
-	Zip      *Zip
-	Made     string
+	Zip *Zip
+	// Seven is kept whole when it was a 7z, because only that format can
+	// refuse to say what it holds.
+	Seven *Seven
+	Made  string
+	// Packed says the list of contents was itself compressed, which only
+	// a 7z does.
+	Packed   bool
 	Gaps     []string
 	Findings []Finding
 }
@@ -89,6 +95,8 @@ func look(name string) (*Tally, error) {
 	t := &Tally{Name: name, Size: info.Size()}
 
 	switch wrapper := wrapperOf(head); {
+	case looksLikeSeven(head):
+		return t, t.fromSeven(file, info.Size())
 	case looksLikeZip(head) || endsLikeZip(file, info.Size()):
 		return t, t.fromZip(file, info.Size())
 	case wrapper == "gzip" || wrapper == "bzip2":
@@ -96,7 +104,7 @@ func look(name string) (*Tally, error) {
 	case looksLikeTar(head):
 		return t, t.fromTar(file, info.Size(), "")
 	case wrapper != "":
-		return nil, fmt.Errorf("this is %s and only zip, tar, tar.gz and tar.bz2 are read here", wrapper)
+		return nil, fmt.Errorf("this is %s and only zip, 7z, tar, tar.gz and tar.bz2 are read here", wrapper)
 	}
 	return nil, errUnknown
 }
@@ -145,6 +153,45 @@ func (t *Tally) fromZip(file *os.File, size int64) error {
 	return nil
 }
 
+func (t *Tally) fromSeven(file *os.File, size int64) error {
+	s, err := ReadSeven(file, size)
+	if s != nil {
+		t.Seven = s
+		t.Kind = "a 7z"
+		t.Gaps = append(t.Gaps, s.Gaps...)
+	}
+	if errors.Is(err, errLocked7z) {
+		// Not a failure to read. The archive read correctly and what it
+		// says is that it will not tell you.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	for _, f := range s.Files {
+		item := Item{
+			Name: f.Name, Size: f.Size, When: f.When,
+			Mode: f.unixMode(), Method: s.Method, Encrypted: s.DataLocked,
+			Kind: "file",
+		}
+		switch {
+		case f.Anti:
+			item.Kind = "deletion"
+		case f.Symlink():
+			item.Kind = "symlink"
+		case f.IsDir:
+			item.Kind = "directory"
+		}
+		t.Items = append(t.Items, item)
+		t.Unpacked += f.Size
+	}
+	if s.HeaderPacked {
+		t.Packed = true
+	}
+	return nil
+}
+
 func (t *Tally) fromTar(file *os.File, size int64, wrapper string) error {
 	tr, err := ReadTar(file, size, wrapper)
 	if err != nil {
@@ -183,12 +230,14 @@ func (t *Tally) writeUp(all bool) *Report {
 		}
 	}
 
+	t.refusesToSay(r)
 	t.listingsDisagree(r)
 	t.namesThatLie(r)
 	t.landsElsewhere(r)
 	t.collides(r)
 	t.spills(r)
 	t.linksOut(r)
+	t.deletions(r)
 	t.strangeKinds(r)
 	t.permissions(r)
 	t.shouldNotBeHere(r)
@@ -655,6 +704,10 @@ func (t *Tally) inventory(r *Report, all bool) {
 	}
 	lines = append(lines, columns("holding", what)...)
 
+	if t.Packed {
+		lines = append(lines, columns("the listing itself",
+			"was compressed, so reading it meant decoding LZMA")...)
+	}
 	if t.Zip != nil {
 		if t.Zip.Before > 0 {
 			lines = append(lines, columns("before the first file",
@@ -743,3 +796,49 @@ func (t *Tally) summary() string {
 }
 
 func (t *Tally) worth(r *Report) bool { return r.worst() >= Lands }
+
+// refusesToSay is the 7z that will not tell you what it holds.
+//
+// A 7z can be built so the names are encrypted as well as the contents. Open
+// it without the password and there is no list at all, which looks exactly
+// like an archive with nothing in it. Saying which of those two you are
+// looking at is worth more than anything else this could say about it.
+func (t *Tally) refusesToSay(r *Report) {
+	if t.Seven == nil || !t.Seven.Locked {
+		return
+	}
+	r.add(Finding{
+		Severity: Lies,
+		Title:    "it will not say what it contains",
+		Lines:    columns("the listing", "is encrypted, not just the files"),
+		Advice: "The names, the sizes and the number of files are all behind the " +
+			"password here, so nothing at all can be checked before it is " +
+			"opened, and an archive like this is indistinguishable from an " +
+			"empty one until somebody types the password. Whatever you were " +
+			"going to decide by looking at the contents, you cannot.",
+	})
+}
+
+// deletions are entries whose job is to remove a file rather than write
+// one, which 7z carries for incremental backups and which almost nobody
+// knows the format can do.
+func (t *Tally) deletions(r *Report) {
+	var rows group
+	for _, item := range t.Items {
+		if item.Kind == "deletion" {
+			rows.add(shorten(item.Name), "is an instruction to delete that file")
+		}
+	}
+	if rows.count == 0 {
+		return
+	}
+	r.add(Finding{
+		Severity: Lands,
+		Title:    plural(rows.count, "entry takes", "entries take") + " something off your disk",
+		Lines:    atMost(rows.lines, 12),
+		Advice: "7z calls these anti-items and they exist so an incremental " +
+			"backup can record a deletion. Unpacking this does not only add " +
+			"files, it removes one, and no listing tool shows the difference " +
+			"between an entry that writes and an entry that deletes.",
+	})
+}

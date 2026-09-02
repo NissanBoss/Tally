@@ -112,6 +112,42 @@ jobs:
           check real.tar.gz '\[CARRIES\].*where it was made'   'the owner on every entry'
           check case.zip    '\[LANDS  \].*becomes one file'    'two names that collide on Windows'
 
+      # The 7z, which is the one format whose list of contents is itself
+      # compressed. If the LZMA decoder in here is wrong, this is where it
+      # shows, because the same files packed with and without a compressed
+      # listing have to come out saying the same thing.
+      - name: Real 7z archives
+        run: |
+          if ! command -v 7z >/dev/null 2>&1; then
+            echo "no 7z on this runner, skipped"
+            exit 0
+          fi
+          cd made
+          7z a -bso0 -bsp0 seven.7z pkg >/dev/null
+          7z a -bso0 -bsp0 -mhc=off sevenplain.7z pkg >/dev/null
+          7z a -bso0 -bsp0 -p1234 -mhe=on sevenlocked.7z pkg >/dev/null
+          cd ..
+
+          ./tally-check --all made/seven.7z > packed.txt 2>&1 || true
+          ./tally-check --all made/sevenplain.7z > plain.txt 2>&1 || true
+          cat packed.txt
+
+          # The two listings have to match entry for entry.
+          grep -A200 "everything in it" packed.txt | tail -n +2 > a.txt
+          grep -A200 "everything in it" plain.txt  | tail -n +2 > b.txt
+          if ! diff -q a.txt b.txt >/dev/null; then
+            echo "the compressed listing decoded to something different:"
+            diff a.txt b.txt || true
+            exit 1
+          fi
+          echo "  ok: the LZMA decoder agrees with the plain listing"
+
+          ./tally-check made/sevenlocked.7z > locked.txt 2>&1 || true
+          grep -q "will not say what it contains" locked.txt || {
+            echo "an archive with an encrypted listing was not reported as one"
+            cat locked.txt; exit 1; }
+          echo "  ok: the archive that refuses to say"
+
       # A tidy archive has to come back quiet, or the tool is useless on
       # the ones that are fine, which is nearly all of them.
       - name: A tidy archive is reported as tidy
@@ -153,7 +189,7 @@ jobs:
           # that has a readme is not checking what it says it is.
           mkdir -p empty && cd empty
           before=$(find . | sort)
-          for f in ../made/*.zip ../made/*.tar.gz; do
+          for f in ../made/*.zip ../made/*.tar.gz ../made/*.7z; do
             ../tally-check --all "$f" >/dev/null 2>&1 || true
           done
           after=$(find . | sort)

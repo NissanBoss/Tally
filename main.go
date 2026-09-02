@@ -95,5 +95,7 @@ This reads both, and then asks the rest: where will these actually land,
 which two names become one file on your machine, which link points out of
 the folder, and what came along that nobody chose to send.
 
-Zip, tar, tar.gz and tar.bz2. It never extracts anything.`)
+Zip, 7z, tar, tar.gz and tar.bz2. It never extracts anything. A 7z keeps its
+own list of contents compressed, so reading one means decoding LZMA, and
+that is in here too.`)
 }
