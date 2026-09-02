@@ -122,17 +122,27 @@ jobs:
             echo "no 7z on this runner, skipped"
             exit 0
           fi
-          cd made
-          7z a -bso0 -bsp0 seven.7z pkg >/dev/null
-          7z a -bso0 -bsp0 -mhc=off sevenplain.7z pkg >/dev/null
-          7z a -bso0 -bsp0 -p1234 -mhe=on sevenlocked.7z pkg >/dev/null
+          # Its own folder, with no symlink in it. 7z follows symlinks by
+          # default and exits with a warning on one that does not resolve,
+          # which is the dangling link the zip and the tar above are made
+          # to carry.
+          mkdir -p sevens/pkg/deploy
+          echo hello > sevens/pkg/README.md
+          printf 'TOKEN=made-up\n' > sevens/pkg/.env
+          head -c 5000 /dev/zero | tr '\0' 'x' > sevens/pkg/deploy/big.txt
+
+          cd sevens
+          7z a -bso0 -bsp0 packed.7z pkg
+          7z a -bso0 -bsp0 -mhc=off plain.7z pkg
+          7z a -bso0 -bsp0 -p1234 -mhe=on locked.7z pkg
           cd ..
 
-          ./tally-check --all made/seven.7z > packed.txt 2>&1 || true
-          ./tally-check --all made/sevenplain.7z > plain.txt 2>&1 || true
+          ./tally-check --all sevens/packed.7z > packed.txt 2>&1 || true
+          ./tally-check --all sevens/plain.7z  > plain.txt 2>&1 || true
           cat packed.txt
 
-          # The two listings have to match entry for entry.
+          # The two listings have to match entry for entry, and that is the
+          # whole check on the decoder.
           grep -A200 "everything in it" packed.txt | tail -n +2 > a.txt
           grep -A200 "everything in it" plain.txt  | tail -n +2 > b.txt
           if ! diff -q a.txt b.txt >/dev/null; then
@@ -140,9 +150,13 @@ jobs:
             diff a.txt b.txt || true
             exit 1
           fi
+          if [ ! -s a.txt ]; then
+            echo "neither listing was read at all"
+            exit 1
+          fi
           echo "  ok: the LZMA decoder agrees with the plain listing"
 
-          ./tally-check made/sevenlocked.7z > locked.txt 2>&1 || true
+          ./tally-check sevens/locked.7z > locked.txt 2>&1 || true
           grep -q "will not say what it contains" locked.txt || {
             echo "an archive with an encrypted listing was not reported as one"
             cat locked.txt; exit 1; }
@@ -189,7 +203,7 @@ jobs:
           # that has a readme is not checking what it says it is.
           mkdir -p empty && cd empty
           before=$(find . | sort)
-          for f in ../made/*.zip ../made/*.tar.gz ../made/*.7z; do
+          for f in ../made/*.zip ../made/*.tar.gz ../sevens/*.7z; do
             ../tally-check --all "$f" >/dev/null 2>&1 || true
           done
           after=$(find . | sort)
